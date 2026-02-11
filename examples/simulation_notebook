@@ -1,0 +1,310 @@
+### A Pluto.jl notebook ###
+# v0.20.13
+
+using Markdown
+using InteractiveUtils
+
+# ╔═╡ 48ef1e75-7dc3-455a-84e3-c308aef5cf06
+push!(LOAD_PATH, "/home/jwein22/scratch/double_descent")
+
+# ╔═╡ 5d030dc7-4ad2-43cf-b82d-cf63c33ebe69
+begin
+	using Revise
+	using GenotypeSimulator
+end
+
+# ╔═╡ 602d9c6f-35d9-4c36-bf8b-0379218927ce
+begin
+	using Random
+	using Statistics
+	using LinearAlgebra
+end
+
+# ╔═╡ 0444e540-5a1f-46ce-9974-e5397ea7aae4
+Random.seed!(3)
+
+# ╔═╡ 1a1c2f75-c4e0-4714-a1a0-06d7a6233551
+# Realistic human population parameters for 1Mb region
+# const params = PopulationParams(
+#     20_000,     # Effective population size (human)
+#     1 * 1.25e-8,    # Human mutation rate per bp per generation
+#     1e-8,       # Human recombination rate per bp per generation
+#     10_000,  # 0.1Mb sequence length
+#     800        # Large sample size (100 individuals)
+# )
+
+# ╔═╡ 577f7b03-a7d7-483c-ab08-15107963c244
+# println("Simulating realistic human genetic variation...")
+
+# ╔═╡ cfff724d-683b-4e44-9493-a3591df14b7c
+# println("Sample: $(params.sample_size) individuals")
+
+# ╔═╡ 5c44cfe0-4e7c-47f0-9eac-bcda16d82a7e
+# println("Region: $(params.sequence_length/1e6) Mb")
+
+# ╔═╡ bd25eebc-eb39-47d9-807b-ea21db7d7a9b
+# Step 1: Simulate neutral background variation with recombination
+# println("\n1. Simulating neutral background variation...")
+
+# ╔═╡ f3f9763c-1569-4806-aff5-ecab556c4942
+#@time neutral_genotypes, neutral_positions = simulate_with_recombination_adaptive(params)
+
+# ╔═╡ d381e52c-5839-4f10-b729-7633536855cd
+#neutral_diploid = haplotypes_to_diploid(neutral_genotypes)
+
+# ╔═╡ 3a81b2b6-0384-4376-8780-503a2c6a84a0
+#neutral_stats = calculate_stats(neutral_diploid, neutral_positions)
+
+# ╔═╡ 7d78d646-e3b7-4ff9-a05b-c796f67efcb5
+#cor(Float64.(neutral_diploid))
+
+# ╔═╡ a6f44ef0-59d3-4b77-8589-823cbf503490
+function sim(rho = 1e-8)
+	params = PopulationParams(
+	    20_000,     # Effective population size (human)
+	    1.25e-8,    # Human mutation rate per bp per generation
+		rho,       # Human recombination rate per bp per generation
+	    10_000,  # 0.1Mb sequence length
+	    200        # Large sample size (100 individuals)
+	)
+	neutral_genotypes, neutral_positions = simulate_with_recombination_adaptive(params)
+	neutral_diploid = haplotypes_to_diploid(neutral_genotypes)
+	eigvals(cor(neutral_diploid))
+end
+
+# ╔═╡ 3daa8ca1-f560-4641-acdc-c1a18803f928
+function all_sims()
+	n_sims = 3
+	ρ_range = [1.25e-8, 3e-8, 5e-8]
+	ρ_vec = ones(n_sims * length(ρ_range))
+	variances = ones(n_sims * length(ρ_range))
+	
+	@inbounds for i in 1:n_sims
+		for j in 1:length(ρ_range)
+			evals = sim(ρ_range[j])
+			GC.gc()
+			variances[j + length(ρ_range) * (i - 1)] = var(abs.(evals))
+			ρ_vec[j + length(ρ_range) * (i - 1)] = ρ_range[j]
+			println("Done with $i, $(ρ_range[j])")
+		end
+	end
+
+	return variances, ρ_vec
+end
+
+# ╔═╡ cb03dc06-4f3f-4a8c-a8db-9b67040e7433
+@time res = all_sims()
+
+# ╔═╡ fdd1618f-bc08-4ae0-b1f4-8b8e736a042b
+
+
+# ╔═╡ 00000000-0000-0000-0000-000000000001
+PLUTO_PROJECT_TOML_CONTENTS = """
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[compat]
+Revise = "~3.8.0"
+"""
+
+# ╔═╡ 00000000-0000-0000-0000-000000000002
+PLUTO_MANIFEST_TOML_CONTENTS = """
+# This file is machine-generated - editing it directly is not advised
+
+julia_version = "1.12.0-rc1"
+manifest_format = "2.0"
+project_hash = "098bb6d30c67e06afaec3eef9bfa316d8a4f5b1f"
+
+[[deps.Artifacts]]
+uuid = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
+version = "1.11.0"
+
+[[deps.Base64]]
+uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
+version = "1.11.0"
+
+[[deps.CodeTracking]]
+deps = ["InteractiveUtils", "UUIDs"]
+git-tree-sha1 = "062c5e1a5bf6ada13db96a4ae4749a4c2234f521"
+uuid = "da1fd8a2-8d9e-5ec2-8556-3022fb5608a2"
+version = "1.3.9"
+
+[[deps.Compiler]]
+git-tree-sha1 = "382d79bfe72a406294faca39ef0c3cef6e6ce1f1"
+uuid = "807dbc54-b67e-4c79-8afb-eafe4df6f2e1"
+version = "0.1.1"
+
+[[deps.CompilerSupportLibraries_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "e66e0078-7015-5450-92f7-15fbd957f2ae"
+version = "1.3.0+1"
+
+[[deps.FileWatching]]
+uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
+version = "1.11.0"
+
+[[deps.InteractiveUtils]]
+deps = ["Markdown"]
+uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+version = "1.11.0"
+
+[[deps.JuliaInterpreter]]
+deps = ["CodeTracking", "InteractiveUtils", "Random", "UUIDs"]
+git-tree-sha1 = "6ac9e4acc417a5b534ace12690bc6973c25b862f"
+uuid = "aa1ae85d-cabe-5617-a682-6adf51b2e16a"
+version = "0.10.3"
+
+[[deps.JuliaSyntaxHighlighting]]
+deps = ["StyledStrings"]
+uuid = "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011"
+version = "1.12.0"
+
+[[deps.LibGit2]]
+deps = ["LibGit2_jll", "NetworkOptions", "Printf", "SHA"]
+uuid = "76f85450-5226-5b5a-8eaa-529ad045b433"
+version = "1.11.0"
+
+[[deps.LibGit2_jll]]
+deps = ["Artifacts", "LibSSH2_jll", "Libdl", "OpenSSL_jll"]
+uuid = "e37daf67-58a4-590a-8e99-b0245dd2ffc5"
+version = "1.9.0+0"
+
+[[deps.LibSSH2_jll]]
+deps = ["Artifacts", "Libdl", "OpenSSL_jll"]
+uuid = "29816b5a-b9ab-546f-933c-edad1886dfa8"
+version = "1.11.3+1"
+
+[[deps.Libdl]]
+uuid = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
+version = "1.11.0"
+
+[[deps.LinearAlgebra]]
+deps = ["Libdl", "OpenBLAS_jll", "libblastrampoline_jll"]
+uuid = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+version = "1.12.0"
+
+[[deps.LoweredCodeUtils]]
+deps = ["Compiler", "JuliaInterpreter"]
+git-tree-sha1 = "b882a7dd7ef37643066ae8f9380beea8fdd89cae"
+uuid = "6f1432cf-f94c-5a45-995e-cdbf5db27b0b"
+version = "3.4.2"
+
+[[deps.Markdown]]
+deps = ["Base64", "JuliaSyntaxHighlighting", "StyledStrings"]
+uuid = "d6f4376e-aef5-505a-96c1-9c027394607a"
+version = "1.11.0"
+
+[[deps.NetworkOptions]]
+uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
+version = "1.3.0"
+
+[[deps.OpenBLAS_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl"]
+uuid = "4536629a-c528-5b80-bd46-f80d51c5b363"
+version = "0.3.29+0"
+
+[[deps.OpenSSL_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "458c3c95-2e84-50aa-8efc-19380b2a3a95"
+version = "3.5.1+0"
+
+[[deps.OrderedCollections]]
+git-tree-sha1 = "05868e21324cede2207c6f0f466b4bfef6d5e7ee"
+uuid = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+version = "1.8.1"
+
+[[deps.Printf]]
+deps = ["Unicode"]
+uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+version = "1.11.0"
+
+[[deps.REPL]]
+deps = ["InteractiveUtils", "JuliaSyntaxHighlighting", "Markdown", "Sockets", "StyledStrings", "Unicode"]
+uuid = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
+version = "1.11.0"
+
+[[deps.Random]]
+deps = ["SHA"]
+uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+version = "1.11.0"
+
+[[deps.Requires]]
+deps = ["UUIDs"]
+git-tree-sha1 = "62389eeff14780bfe55195b7204c0d8738436d64"
+uuid = "ae029012-a4dd-5104-9daa-d747884805df"
+version = "1.3.1"
+
+[[deps.Revise]]
+deps = ["CodeTracking", "FileWatching", "JuliaInterpreter", "LibGit2", "LoweredCodeUtils", "OrderedCollections", "REPL", "Requires", "UUIDs", "Unicode"]
+git-tree-sha1 = "f6f7d30fb0d61c64d0cfe56cf085a7c9e7d5bc80"
+uuid = "295af30f-e4ad-537b-8983-00126c2a3abe"
+version = "3.8.0"
+
+    [deps.Revise.extensions]
+    DistributedExt = "Distributed"
+
+    [deps.Revise.weakdeps]
+    Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+
+[[deps.SHA]]
+uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+version = "0.7.0"
+
+[[deps.Sockets]]
+uuid = "6462fe0b-24de-5631-8697-dd941f90decc"
+version = "1.11.0"
+
+[[deps.Statistics]]
+deps = ["LinearAlgebra"]
+git-tree-sha1 = "ae3bb1eb3bba077cd276bc5cfc337cc65c3075c0"
+uuid = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+version = "1.11.1"
+
+    [deps.Statistics.extensions]
+    SparseArraysExt = ["SparseArrays"]
+
+    [deps.Statistics.weakdeps]
+    SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[[deps.StyledStrings]]
+uuid = "f489334b-da3d-4c2e-b8f0-e476e12c162b"
+version = "1.11.0"
+
+[[deps.UUIDs]]
+deps = ["Random", "SHA"]
+uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+version = "1.11.0"
+
+[[deps.Unicode]]
+uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
+version = "1.11.0"
+
+[[deps.libblastrampoline_jll]]
+deps = ["Artifacts", "Libdl"]
+uuid = "8e850b90-86db-534c-a0d3-1478176c7d93"
+version = "5.13.1+0"
+"""
+
+# ╔═╡ Cell order:
+# ╠═48ef1e75-7dc3-455a-84e3-c308aef5cf06
+# ╠═5d030dc7-4ad2-43cf-b82d-cf63c33ebe69
+# ╠═602d9c6f-35d9-4c36-bf8b-0379218927ce
+# ╠═0444e540-5a1f-46ce-9974-e5397ea7aae4
+# ╠═1a1c2f75-c4e0-4714-a1a0-06d7a6233551
+# ╠═577f7b03-a7d7-483c-ab08-15107963c244
+# ╠═cfff724d-683b-4e44-9493-a3591df14b7c
+# ╠═5c44cfe0-4e7c-47f0-9eac-bcda16d82a7e
+# ╠═bd25eebc-eb39-47d9-807b-ea21db7d7a9b
+# ╠═f3f9763c-1569-4806-aff5-ecab556c4942
+# ╠═d381e52c-5839-4f10-b729-7633536855cd
+# ╠═3a81b2b6-0384-4376-8780-503a2c6a84a0
+# ╠═7d78d646-e3b7-4ff9-a05b-c796f67efcb5
+# ╠═a6f44ef0-59d3-4b77-8589-823cbf503490
+# ╠═3daa8ca1-f560-4641-acdc-c1a18803f928
+# ╠═cb03dc06-4f3f-4a8c-a8db-9b67040e7433
+# ╠═fdd1618f-bc08-4ae0-b1f4-8b8e736a042b
+# ╟─00000000-0000-0000-0000-000000000001
+# ╟─00000000-0000-0000-0000-000000000002
