@@ -70,6 +70,58 @@ function uniform_recombination_map(sequence_length::Int, rate::Float64)
 end
 
 """
+    periodic_hotspot_recombination_map(sequence_length::Int, rate::Float64;
+                                       period_bp::Int=100_000,
+                                       hotspot_fraction::Float64=0.05,
+                                       hotspot_multiplier::Float64=20.0,
+                                       coldspot_multiplier::Float64=0.02) -> RecombinationMap
+
+Create a piecewise-constant recombination map with periodic hotspot/coldspot structure.
+The map is rescaled so the genome-wide average recombination rate equals `rate`.
+"""
+function periodic_hotspot_recombination_map(sequence_length::Int, rate::Float64;
+                                            period_bp::Int=100_000,
+                                            hotspot_fraction::Float64=0.05,
+                                            hotspot_multiplier::Float64=20.0,
+                                            coldspot_multiplier::Float64=0.02)
+    @assert sequence_length > 0 "sequence_length must be positive"
+    @assert period_bp > 1 "period_bp must be > 1"
+    @assert 0 < hotspot_fraction < 1 "hotspot_fraction must be in (0,1)"
+    @assert hotspot_multiplier >= 0 "hotspot_multiplier must be >= 0"
+    @assert coldspot_multiplier >= 0 "coldspot_multiplier must be >= 0"
+
+    avg_multiplier = hotspot_fraction * hotspot_multiplier +
+                     (1 - hotspot_fraction) * coldspot_multiplier
+    @assert avg_multiplier > 0 "Average multiplier must be positive"
+
+    hotspot_rate = rate * hotspot_multiplier / avg_multiplier
+    coldspot_rate = rate * coldspot_multiplier / avg_multiplier
+    hotspot_len = max(1, round(Int, hotspot_fraction * period_bp))
+
+    positions = Int[1]
+    rates = Float64[]
+    start_pos = 1
+
+    while start_pos <= sequence_length
+        stop_pos = min(sequence_length + 1, start_pos + period_bp)
+        hotspot_stop = min(stop_pos, start_pos + hotspot_len)
+
+        if hotspot_stop > start_pos
+            push!(rates, hotspot_rate)
+            push!(positions, hotspot_stop)
+        end
+        if stop_pos > hotspot_stop
+            push!(rates, coldspot_rate)
+            push!(positions, stop_pos)
+        end
+        start_pos = stop_pos
+    end
+
+    positions[end] == sequence_length + 1 || push!(positions, sequence_length + 1)
+    return RecombinationMap(positions, rates)
+end
+
+"""
     sample_recombination_position(recomb_map::RecombinationMap) -> Int
 
 Sample a recombination position from the recombination map.
@@ -612,7 +664,8 @@ function _merge_sorted_int_vecs(a::Vector{Int}, b::Vector{Int})
 end
 
 function build_arg_tree(sample_size::Int, ne::Int, sequence_length::Int,
-    recomb_map::RecombinationMap; rng::AbstractRNG=Random.GLOBAL_RNG)
+    recomb_map::RecombinationMap; rng::AbstractRNG=Random.GLOBAL_RNG,
+    demography::Union{Nothing, DemographyModel}=nothing)
     n_haplotypes = 2 * sample_size
     total_recomb_rate = isempty(recomb_map.cumulative_rates) ? 0.0 : recomb_map.cumulative_rates[end]
 
@@ -731,13 +784,13 @@ function build_arg_tree(sample_size::Int, ne::Int, sequence_length::Int,
 
         k = length(active_ids)
         k < 2 && break
-        coal_rate   = k * (k - 1) / (4.0 * ne)
+        coal_scale = k * (k - 1) / 4.0
         recomb_rate = k * total_recomb_rate
-        total_rate  = coal_rate + recomb_rate
-        total_rate <= 0.0 && break
-
-        dt = randexp(rng) / total_rate
+        dt = sample_piecewise_wait(recomb_rate, coal_scale, current_time, ne, demography; rng=rng)
         current_time += dt
+        coal_rate = coal_scale / effective_population_size(demography, current_time, ne)
+        total_rate = coal_rate + recomb_rate
+        total_rate <= 0.0 && break
 
         if rand(rng) < coal_rate / total_rate
             # ── Coalescence (thinning: uniform pair, skip if disjoint) ──
@@ -922,6 +975,8 @@ end
 
 Convenience method for build_arg_tree that accepts PopulationParams.
 """
-function build_arg_tree(params::PopulationParams, recomb_map::RecombinationMap; rng::AbstractRNG=Random.GLOBAL_RNG)
-    return build_arg_tree(params.sample_size, params.ne, params.sequence_length, recomb_map; rng=rng)
+function build_arg_tree(params::PopulationParams, recomb_map::RecombinationMap; rng::AbstractRNG=Random.GLOBAL_RNG,
+                        demography::Union{Nothing, DemographyModel}=nothing)
+    return build_arg_tree(params.sample_size, params.ne, params.sequence_length, recomb_map;
+                          rng=rng, demography=demography)
 end

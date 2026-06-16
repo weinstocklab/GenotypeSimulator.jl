@@ -23,6 +23,79 @@ mutable struct CoalescentNode
 end
 
 """
+    DemographicEpoch
+
+Piecewise-constant effective population size on `[t_start, t_end)`, measured
+backwards in generations.
+"""
+struct DemographicEpoch
+    t_start::Float64
+    t_end::Float64
+    ne::Float64
+
+    function DemographicEpoch(t_start, t_end, ne)
+        t_start = Float64(t_start)
+        t_end = Float64(t_end)
+        ne = Float64(ne)
+        @assert t_start >= 0 "Epoch start time must be non-negative"
+        @assert t_end > t_start "Epoch end time must be greater than start time"
+        @assert ne > 0 "Epoch effective population size must be positive"
+        new(t_start, t_end, ne)
+    end
+end
+
+"""
+    DemographyModel
+
+Ordered piecewise-constant demographic schedule for time-varying coalescent rates.
+"""
+struct DemographyModel
+    epochs::Vector{DemographicEpoch}
+
+    function DemographyModel(epochs::Vector{DemographicEpoch})
+        @assert !isempty(epochs) "DemographyModel must contain at least one epoch"
+        @assert epochs[1].t_start == 0.0 "DemographyModel must start at time 0"
+        prev_end = epochs[1].t_start
+        for epoch in epochs
+            @assert epoch.t_start == prev_end "Demography epochs must be contiguous and sorted"
+            prev_end = epoch.t_end
+        end
+        new(epochs)
+    end
+end
+
+"""
+    constant_demography(ne::Real) -> DemographyModel
+
+Convenience constructor for a constant-size population.
+"""
+function constant_demography(ne::Real)
+    return DemographyModel([DemographicEpoch(0.0, Inf, ne)])
+end
+
+"""
+    recent_bottleneck_demography(ne_present::Real, ne_bottleneck::Real,
+                                 t_start::Real, t_end::Real;
+                                 ne_ancestral::Real=ne_present) -> DemographyModel
+
+Three-epoch demography with a recent bottleneck on `[t_start, t_end)`.
+"""
+function recent_bottleneck_demography(ne_present::Real, ne_bottleneck::Real,
+                                      t_start::Real, t_end::Real;
+                                      ne_ancestral::Real=ne_present)
+    t_start = Float64(t_start)
+    t_end = Float64(t_end)
+    @assert t_start > 0 "Bottleneck start time must be > 0"
+    @assert t_end > t_start "Bottleneck end time must be greater than start time"
+
+    return DemographyModel([
+        DemographicEpoch(0.0, t_start, ne_present),
+        DemographicEpoch(t_start, t_end, ne_bottleneck),
+        DemographicEpoch(t_end, Inf, ne_ancestral),
+    ])
+end
+
+"""
     PopulationParams
 
 Parameters for human population genetic simulation.

@@ -13,7 +13,9 @@ Adaptive simulation that automatically chooses optimal algorithms and data struc
 function simulate_genotypes_adaptive(params::PopulationParams=HUMAN_PARAMS; 
                                    rng::AbstractRNG=Random.GLOBAL_RNG,
                                    selection_params::Union{SelectionParameters, Nothing}=nothing,
-                                   recombination_map::Union{RecombinationMap, Nothing}=nothing)
+                                   recombination_map::Union{RecombinationMap, Nothing}=nothing,
+                                   arg_genotype_mode::Symbol=:marginal,
+                                   demography::Union{Nothing, DemographyModel}=nothing)
     
     # Auto-configure memory optimization
     config = auto_configure_memory_optimization!(params)
@@ -23,24 +25,44 @@ function simulate_genotypes_adaptive(params::PopulationParams=HUMAN_PARAMS;
     lineage_origin = nothing
     recomb_events_list = nothing
     if selection_params !== nothing
+        demography === nothing || error("DemographyModel is not yet supported together with selection_params")
         println("Building coalescent tree with selection...")
         root = build_coalescent_tree_with_selection(params, selection_params; rng=rng)
     elseif recombination_map !== nothing
         println("Building ARG with recombination...")
-        root, recomb_events_list, node_intervals, lineage_origin = build_arg_tree(params, recombination_map; rng=rng)
+        build_time = @elapsed begin
+            root, recomb_events_list, node_intervals, lineage_origin =
+                build_arg_tree(params, recombination_map; rng=rng, demography=demography)
+        end
+        println("ARG construction time: $(round(build_time, digits=3)) s")
     else
         println("Building standard coalescent tree...")
-        root = build_coalescent_tree(params; rng=rng)
+        root = build_coalescent_tree(params; rng=rng, demography=demography)
     end
     
     # Add mutations / place genotypes
     if recomb_events_list !== nothing && node_intervals !== nothing && lineage_origin !== nothing
-        # Use marginal tree approach for ARG (correct mutation placement)
-        println("Placing mutations on marginal trees...")
-        genotypes, positions = simulate_genotypes_marginal(
-            root, recomb_events_list, node_intervals, lineage_origin,
-            params.sample_size, params.sequence_length, params.mutation_rate; rng=rng)
-        println("Using marginal-tree ARG genotype simulation")
+        genotype_time = @elapsed begin
+            if arg_genotype_mode == :marginal
+                # Correct but expensive at high recombination: O(intervals * haplotypes * tree depth).
+                println("Placing mutations on marginal trees...")
+                genotypes, positions = simulate_genotypes_marginal(
+                    root, recomb_events_list, node_intervals, lineage_origin,
+                    params.sample_size, params.sequence_length, params.mutation_rate; rng=rng)
+                println("Using marginal-tree ARG genotype simulation")
+            elseif arg_genotype_mode == :interval
+                # Faster approximation for large sweeps: place branch mutations only on ancestral intervals,
+                # then extract with interval filters in one tree traversal.
+                println("Placing interval-filtered ARG mutations...")
+                add_mutations_arg!(root, params.mutation_rate, params.sequence_length, node_intervals; rng=rng)
+                genotypes, positions = extract_genotypes_arg(
+                    root, params.sample_size, params.sequence_length, node_intervals, lineage_origin)
+                println("Using interval-filtered ARG genotype simulation")
+            else
+                error("Unknown arg_genotype_mode: $(arg_genotype_mode). Use :marginal or :interval.")
+            end
+        end
+        println("ARG genotype extraction time: $(round(genotype_time, digits=3)) s")
     else
         # Standard mutation placement for non-recombination trees
         println("Adding mutations...")
@@ -118,9 +140,14 @@ end
 
 Adaptive ARG simulation with automatic optimization.
 """
-function simulate_with_recombination_adaptive(params::PopulationParams=HUMAN_PARAMS; rng::AbstractRNG=Random.GLOBAL_RNG)
+function simulate_with_recombination_adaptive(params::PopulationParams=HUMAN_PARAMS;
+                                              rng::AbstractRNG=Random.GLOBAL_RNG,
+                                              arg_genotype_mode::Symbol=:marginal,
+                                              demography::Union{Nothing, DemographyModel}=nothing)
     recombination_map = uniform_recombination_map(params.sequence_length, params.recombination_rate)
-    return simulate_genotypes_adaptive(params; rng=rng, recombination_map=recombination_map)
+    return simulate_genotypes_adaptive(params; rng=rng, recombination_map=recombination_map,
+                                       arg_genotype_mode=arg_genotype_mode,
+                                       demography=demography)
 end
 
 """

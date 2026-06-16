@@ -10,12 +10,13 @@ using LinearAlgebra
 import Statistics: cor, mean, std, var
 
 # Export main types and functions
-export PopulationParams, HUMAN_PARAMS
+export PopulationParams, HUMAN_PARAMS, DemographicEpoch, DemographyModel
+export constant_demography, recent_bottleneck_demography
 export CoalescentNode
 export simulate_genotypes, haplotypes_to_diploid, extract_genotypes, extract_genotypes_arg
 export calculate_stats, save_genotypes, tajimas_d, print_stats, calculate_spectral_stats, SpectralStats
 export simulate_coalescent_times, build_coalescent_tree
-export RecombinationMap, uniform_recombination_map
+export RecombinationMap, uniform_recombination_map, periodic_hotspot_recombination_map
 export build_arg_tree, simulate_with_recombination, simulate_genotypes_marginal
 export SelectionModel, NeutralSelection, DirectionalSelection, BalancingSelection, BackgroundSelection
 export SelectionParameters, simulate_with_selection, allele_frequency_trajectory, effective_population_size_with_selection

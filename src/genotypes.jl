@@ -19,7 +19,8 @@ Use `force_standard=true` to disable automatic optimization.
 """
 function simulate_genotypes(params::PopulationParams=HUMAN_PARAMS; 
                            rng::AbstractRNG=Random.GLOBAL_RNG,
-                           force_standard::Bool=false)
+                           force_standard::Bool=false,
+                           demography::Union{Nothing, DemographyModel}=nothing)
     
     # Check if we should use adaptive optimization
     if !force_standard
@@ -31,7 +32,7 @@ function simulate_genotypes(params::PopulationParams=HUMAN_PARAMS;
            params.sequence_length > large_sequence_threshold
             
             println("Large simulation detected - using adaptive memory optimization")
-            return simulate_genotypes_adaptive(params; rng=rng)
+            return simulate_genotypes_adaptive(params; rng=rng, demography=demography)
         end
     end
     
@@ -39,7 +40,7 @@ function simulate_genotypes(params::PopulationParams=HUMAN_PARAMS;
     println("Using standard simulation algorithms")
     
     # Build coalescent tree
-    root = build_coalescent_tree(params; rng=rng)
+    root = build_coalescent_tree(params; rng=rng, demography=demography)
     
     # Add mutations
     add_mutations!(root, params.mutation_rate, params.sequence_length; rng=rng)
@@ -149,106 +150,238 @@ function simulate_genotypes_marginal(root::CoalescentNode,
                                      rng::AbstractRNG=Random.GLOBAL_RNG)
     n_haps = 2 * n_samples
 
-    # Build redirect map: lineage_id → [(breakpoint, fragment_id), ...] sorted descending
-    recomb_redirects = Dict{Int, Vector{Tuple{Int,Int}}}()
-    for evt in recomb_events
-        r = get!(recomb_redirects, evt.left_parent_id) do
-            Tuple{Int,Int}[]
+    @inline function interval_contains(ivs::Vector{Tuple{Int,Int}}, pos::Int)
+        if length(ivs) == 1
+            s, e = ivs[1]
+            return s <= pos < e
         end
-        push!(r, (evt.position, evt.right_parent_id))
-    end
-    for (_, r) in recomb_redirects
-        sort!(r, by=first, rev=true)
+        lo = 1
+        hi = length(ivs)
+        while lo <= hi
+            mid = (lo + hi) >>> 1
+            s, e = ivs[mid]
+            if pos < s
+                hi = mid - 1
+            elseif pos >= e
+                lo = mid + 1
+            else
+                return true
+            end
+        end
+        return false
     end
 
-    # Build node-by-id lookup
-    node_by_id = Dict{Int, CoalescentNode}()
+    @inline function redirected_fragment(rdirs::Vector{Tuple{Int,Int}}, pos::Int)
+        if length(rdirs) == 1
+            bp, frag_id = rdirs[1]
+            return bp <= pos ? frag_id : 0
+        end
+        lo = 1
+        hi = length(rdirs)
+        ans = 0
+        while lo <= hi
+            mid = (lo + hi) >>> 1
+            bp, frag_id = rdirs[mid]
+            if bp <= pos
+                ans = frag_id
+                lo = mid + 1
+            else
+                hi = mid - 1
+            end
+        end
+        return ans
+    end
+
+    @inline function interval_length(ivs::Vector{Tuple{Int,Int}}, seq_len::Int)
+        total = 0
+        for (s, e) in ivs
+            lo = max(s, 1)
+            hi = min(e, seq_len + 1)
+            hi > lo && (total += hi - lo)
+        end
+        return total
+    end
+
+    function sample_interval_position(ivs::Vector{Tuple{Int,Int}}, total_len::Int,
+                                      seq_len::Int, rng::AbstractRNG)
+        if length(ivs) == 1
+            s, e = ivs[1]
+            lo = max(s, 1)
+            hi = min(e, seq_len + 1)
+            return rand(rng, lo:(hi - 1))
+        end
+        r = rand(rng, 1:total_len)
+        for (s, e) in ivs
+            lo = max(s, 1)
+            hi = min(e, seq_len + 1)
+            len = hi - lo
+            len <= 0 && continue
+            if r <= len
+                return lo + r - 1
+            end
+            r -= len
+        end
+        return seq_len
+    end
+
+    # Build dense node-id lookups. Node IDs are assigned sequentially by the ARG
+    # builder, so arrays avoid hash-table work in the interval/haplotype loop.
+    nodes_seen = CoalescentNode[]
+    max_node_id = 0
     stk = CoalescentNode[root]
     while !isempty(stk)
         n = pop!(stk)
-        node_by_id[n.id] = n
+        push!(nodes_seen, n)
+        max_node_id = max(max_node_id, n.id)
         for c in n.children
             push!(stk, c)
         end
     end
 
-    # Collect breakpoints and build intervals where the marginal tree is constant
-    breakpoints = sort!(unique!([evt.position for evt in recomb_events]))
-    intervals = Tuple{Int,Int}[]
-    prev = 1
-    for bp in breakpoints
-        bp > prev && push!(intervals, (prev, bp))
-        prev = bp
+    node_by_id = Vector{CoalescentNode}(undef, max_node_id)
+    parent_id = zeros(Int, max_node_id)
+    branch_delta = zeros(Float64, max_node_id)
+    node_interval_vec = [Tuple{Int,Int}[] for _ in 1:max_node_id]
+    single_interval_start = zeros(Int, max_node_id)
+    single_interval_end = zeros(Int, max_node_id)
+    recomb_redirects = [Tuple{Int,Int}[] for _ in 1:max_node_id]
+    single_redirect_bp = zeros(Int, max_node_id)
+    single_redirect_frag = zeros(Int, max_node_id)
+    lineage_sample_vec = [Int[] for _ in 1:max_node_id]
+
+    for node in nodes_seen
+        node_by_id[node.id] = node
+        node.parent === nothing && continue
+        parent_id[node.id] = node.parent.id
+        branch_delta[node.id] = node.parent.time - node.time
     end
-    prev <= seq_len && push!(intervals, (prev, seq_len + 1))
-    isempty(intervals) && push!(intervals, (1, seq_len + 1))
 
-    # For each interval, build marginal tree by tracing all haplotypes and place mutations
-    all_mutations = Dict{Int, Vector{Int}}()  # position → list of haplotype ids
-
-    for (iv_start, iv_end) in intervals
-        iv_len = iv_end - iv_start
-        test_pos = iv_start  # representative position for this interval
-
-        # Trace each haplotype to root at test_pos, recording branch sample sets
-        branch_samples = Dict{Int, Set{Int}}()
-        branch_length = Dict{Int, Float64}()
-
-        for hap in 1:n_haps
-            node = node_by_id[hap]
-            safety = 0
-            while node.parent !== nothing
-                safety += 1
-                safety > 50000 && break  # safety valve
-
-                # Check redirects at CURRENT NODE first (handles chained redirects)
-                rdirs = get(recomb_redirects, node.id, nothing)
-                if rdirs !== nothing
-                    found_redirect = false
-                    for (bp, frag_id) in rdirs
-                        if test_pos >= bp && haskey(node_by_id, frag_id)
-                            node = node_by_id[frag_id]
-                            found_redirect = true
-                            break
-                        end
-                    end
-                    found_redirect && continue  # re-check at new node
-                end
-
-                # Check node_intervals
-                ivs = get(node_intervals, node.id, nothing)
-                if ivs !== nothing && !any(s <= test_pos < e for (s, e) in ivs)
-                    break
-                end
-
-                # Record this branch
-                samples = get!(branch_samples, node.id) do
-                    Set{Int}()
-                end
-                push!(samples, hap)
-                branch_length[node.id] = node.parent.time - node.time
-
-                # Move up to parent
-                node = node.parent
+    for (nid, ivs) in node_intervals
+        if 1 <= nid <= max_node_id
+            if length(ivs) == 1
+                single_interval_start[nid], single_interval_end[nid] = ivs[1]
+            else
+                node_interval_vec[nid] = ivs
             end
         end
+    end
 
-        # Place mutations on branches that carry a proper subset of samples
-        for (nid, samples) in branch_samples
-            ns = length(samples)
-            if ns > 0 && ns < n_haps
-                bl = branch_length[nid]
-                expected = mu * iv_len * bl
-                n_mut = rand(rng, Poisson(expected))
-                for _ in 1:n_mut
-                    pos = rand(rng, iv_start:(iv_end - 1))
-                    muts = get!(all_mutations, pos) do
-                        Int[]
-                    end
-                    for s in samples
-                        push!(muts, s)
-                    end
+    for (nid, samples) in lineage_samples
+        1 <= nid <= max_node_id && (lineage_sample_vec[nid] = samples)
+    end
+
+    # Build redirect map: lineage_id → [(breakpoint, fragment_id), ...] sorted ascending
+    for evt in recomb_events
+        if 1 <= evt.left_parent_id <= max_node_id
+            push!(recomb_redirects[evt.left_parent_id], (evt.position, evt.right_parent_id))
+        end
+    end
+    for r in recomb_redirects
+        sort!(r, by=first)
+    end
+    for nid in 1:max_node_id
+        r = recomb_redirects[nid]
+        if length(r) == 1
+            single_redirect_bp[nid], single_redirect_frag[nid] = r[1]
+            empty!(r)
+        end
+    end
+
+    all_mutations = Dict{Int, Vector{Int}}()  # position → list of haplotype ids
+    full_genome = [(1, seq_len + 1)]
+    carriers = Int[]
+
+    function hap_carries_branch(hap::Int, target_id::Int, pos::Int)
+        node_id = hap
+        safety = 0
+        @inbounds while parent_id[node_id] != 0
+            safety += 1
+            safety > 50000 && return false  # safety valve
+
+            # Check redirects at CURRENT NODE first (handles chained redirects)
+            frag_id = 0
+            rbp = single_redirect_bp[node_id]
+            if rbp != 0
+                frag_id = rbp <= pos ? single_redirect_frag[node_id] : 0
+            else
+                rdirs = recomb_redirects[node_id]
+                !isempty(rdirs) && (frag_id = redirected_fragment(rdirs, pos))
+            end
+            if frag_id != 0
+                node_id = frag_id
+                continue
+            end
+
+            s = single_interval_start[node_id]
+            if s != 0
+                if !(s <= pos < single_interval_end[node_id])
+                    return false
                 end
+            else
+                ivs = node_interval_vec[node_id]
+                if !isempty(ivs) && !interval_contains(ivs, pos)
+                    return false
+                end
+            end
+
+            node_id == target_id && return true
+            node_id = parent_id[node_id]
+        end
+        return false
+    end
+
+    function collect_branch_carriers!(carriers::Vector{Int}, target_id::Int, pos::Int)
+        empty!(carriers)
+        @inbounds target_samples = lineage_sample_vec[target_id]
+        if length(target_samples) == 1
+            push!(carriers, target_samples[1])
+        elseif isempty(target_samples)
+            for hap in 1:n_haps
+                hap_carries_branch(hap, target_id, pos) && push!(carriers, hap)
+            end
+        else
+            for hap in target_samples
+                hap_carries_branch(hap, target_id, pos) && push!(carriers, hap)
+            end
+        end
+        return length(carriers)
+    end
+
+    # Mutation-driven marginal simulation. Candidate mutations are sampled on
+    # each ARG branch over its ancestral material, then thinned to branches that
+    # carry a proper subset of samples in the local marginal tree at that site.
+    for node in nodes_seen
+        nid = node.id
+        parent_id[nid] == 0 && continue
+        bl = branch_delta[nid]
+        bl <= 0 && continue
+
+        s = single_interval_start[nid]
+        e = single_interval_end[nid]
+        ivs = node_interval_vec[nid]
+        if s != 0
+            lo = max(s, 1)
+            hi = min(e, seq_len + 1)
+            material_len = hi - lo
+        else
+            isempty(ivs) && (ivs = full_genome)
+            material_len = interval_length(ivs, seq_len)
+        end
+        material_len <= 0 && continue
+
+        expected = mu * material_len * bl
+        n_mut = rand(rng, Poisson(expected))
+        n_mut == 0 && continue
+
+        for _ in 1:n_mut
+            pos = s != 0 ? rand(rng, max(s, 1):(min(e, seq_len + 1) - 1)) :
+                  sample_interval_position(ivs, material_len, seq_len, rng)
+            ns = collect_branch_carriers!(carriers, nid, pos)
+            if ns > 0 && ns < n_haps
+                muts = get!(all_mutations, pos) do
+                    Int[]
+                end
+                append!(muts, carriers)
             end
         end
     end
@@ -352,16 +485,16 @@ function extract_genotypes_arg(root::CoalescentNode, n_samples::Int, sequence_le
         end
     end
 
-    # Strip zero columns
+    # Keep only polymorphic columns, matching the marginal ARG extractor.
     poly = Int[]
     for j in 1:n_sites
-        any_nz = false
+        col_sum = 0
         @inbounds for i in 1:2*n_samples
-            if genotypes[i, j] != 0
-                any_nz = true; break
-            end
+            col_sum += genotypes[i, j]
         end
-        any_nz && push!(poly, j)
+        if col_sum > 0 && col_sum < 2 * n_samples
+            push!(poly, j)
+        end
     end
     if length(poly) < n_sites
         genotypes = genotypes[:, poly]
@@ -483,7 +616,8 @@ Use `force_standard=true` to disable automatic optimization.
 """
 function simulate_with_recombination(params::PopulationParams=HUMAN_PARAMS; 
                                    rng::AbstractRNG=Random.GLOBAL_RNG,
-                                   force_standard::Bool=false)
+                                   force_standard::Bool=false,
+                                   demography::Union{Nothing, DemographyModel}=nothing)
     
     # Check if we should use adaptive optimization
     if !force_standard
@@ -494,7 +628,7 @@ function simulate_with_recombination(params::PopulationParams=HUMAN_PARAMS;
            params.sequence_length > large_sequence_threshold
             
             println("Large ARG simulation detected - using adaptive memory optimization")
-            return simulate_with_recombination_adaptive(params; rng=rng)
+            return simulate_with_recombination_adaptive(params; rng=rng, demography=demography)
         end
     end
     
@@ -512,7 +646,8 @@ function simulate_with_recombination(params::PopulationParams=HUMAN_PARAMS;
     
     # Build ARG (Ancestral Recombination Graph)
     println("Building ARG with recombination...")
-    root, recomb_events, node_intervals, lineage_samples = build_arg_tree(params, recomb_map; rng=rng)
+    root, recomb_events, node_intervals, lineage_samples =
+        build_arg_tree(params, recomb_map; rng=rng, demography=demography)
     
     # Simulate genotypes using marginal trees
     println("Placing mutations on marginal trees...")
